@@ -1,68 +1,68 @@
 # QuadMeshTesser
 
-**基于骨架驱动和可控卷积曲面约束的神经元四边形表面建模方法**
+**Skeleton-Driven Quadrilateral Surface Modeling of Neurons with Controllable Convolution Constraints**
 
-从 SWC 树形骨架生成以四边形为主、拓扑可检查的神经元膜网格：先显式扫掠与分叉/胞体衔接得到基网格，再经细分，并以可控卷积等值面约束顶点，在保持四边形连通关系的同时提高几何保真度。
+QuadMeshTesser builds quadrilateral-dominant, topology-checkable neuronal membrane meshes from SWC skeletons. An explicit sweep and junction/soma assembly produce a base mesh; Catmull–Clark subdivision then increases resolution; controllable convolution isosurfaces constrain vertex positions so the mesh stays faithful to the skeleton radii while remaining editable.
 
 ![QuadMeshTesser workflow](workflow.png)
 
-*总体流程：SWC 预处理 → RMF 四边形扫掠 → 分叉/胞体衔接 → Catmull–Clark 细分 → 可控卷积等值面投影。*
+*Pipeline: SWC preprocessing → RMF quad sweep → fork/soma joining → Catmull–Clark subdivision → controllable convolution isosurface projection.*
 
-## 功能
+## Features
 
-- **输入**：SWC 神经元形态（带半径的树状骨架）
-- **输出**：四边形主导表面网格（OBJ，含四边面）
-- **建网**：旋转最小化标架（RMF）截面扫掠、分叉 Y 型衔接、胞体球面约束与多区域水密拼接
-- **优化**：Catmull–Clark 细分；可选将顶点投影到线骨架可控卷积场等值面
-- **界面**：PyQt5 / qtpy + PyVista 参数面板与三维预览
+- **Input:** SWC neuronal morphologies (radius-annotated tree skeletons)
+- **Output:** Quadrilateral-dominant surface meshes (OBJ with quad faces)
+- **Meshing:** Rotation-minimizing frame (RMF) cross-section sweep, Y-fork junction strips, soma sphere constraints, and multi-region watertight stitching
+- **Refinement:** Catmull–Clark subdivision; optional projection of vertices onto a line-skeleton controllable convolution isosurface
+- **UI:** PyQt5 / qtpy + PyVista parameter panel and 3D preview
 
-## 安装
+## Install
 
 ```bash
 cd QuadMeshTesser
 python -m pip install -r requirements.txt
 python -m app.main
-# 或双击 setup_and_run.bat / run.bat
+# or run setup_and_run.bat / run.bat
 ```
 
-依赖：`numpy`, `pandas`, `scipy`, `PyQt5`, `qtpy`, `pyvista`, `pyvistaqt`
+Dependencies: `numpy`, `pandas`, `scipy`, `PyQt5`, `qtpy`, `pyvista`, `pyvistaqt`
 
-> Windows 上若 PySide6 / PyQt6 出现 DLL 问题，本项目默认使用 **PyQt5**（通过 `qtpy`）。
+> On Windows, if PySide6 / PyQt6 hit DLL issues, this project defaults to **PyQt5** via `qtpy`.
 
-启动后可从「快速示例」或「打开 SWC」加载数据（如 `data/Gol.swc`、`data/test_linear_0.swc`）。
+After launch, load data from **Quick samples** or **Open SWC** (e.g. `data/Gol.swc`, `data/test_linear_0.swc`).
 
-## 主要参数
+## Main parameters
 
-| 参数 | 说明 |
-|------|------|
-| 截面边数 | 截面多边形边数；**4** 为纯四边形扫掠 |
-| Catmull–Clark 细分 | 细分层数，越大越光滑、顶点越多 |
-| 半径缩放 | SWC 半径全局缩放 |
-| 仅扫掠管道 | 只生成基网格，跳过细分与卷积投影 |
-| SWC 预处理 | 消除节点球相交、短边异常等 |
-| 逼近方式 | 卷积约束方式（如可控卷积 / 线积分 / 仅细分等） |
-| 核函数 | `quartic`（有限支撑）/ `cauchy` |
-| 等值 iso | 目标等值面 \(F=T\) |
-| 投影到等值面 | 将细分顶点迭代投影到卷积曲面 |
+| Parameter | Description |
+|-----------|-------------|
+| Cross-section sides | Polygon sides per section; **4** yields a pure-quad sweep |
+| Catmull–Clark levels | Subdivision depth (smoother, more vertices) |
+| Radius scale | Global scale on SWC radii |
+| Sweep only | Build the base mesh only; skip subdivision and convolution projection |
+| SWC preprocess | Remove overlapping node spheres, short-edge issues, etc. |
+| Approximation mode | Convolution constraint style (controllable field / line integral / subdivision-only, …) |
+| Kernel | `quartic` (compact support) / `cauchy` |
+| Iso value | Target isosurface \(F = T\) |
+| Project to isosurface | Iteratively project subdivided vertices onto the convolution surface |
 
-## 方法要点
+## Method highlights
 
-- **骨架驱动显式建网**：RMF 扫掠管壁，分叉处 Y 型条带或凸包过渡，胞体球面与一级分支衔接，边占用检查保证水密流形。
-- **可控卷积约束**：由同一套骨架与半径生成融合场；有限/可变支撑抑制过度混合；细分后沿场梯度将顶点拉回等值面，减轻纯细分带来的胀缩。
-- **四边形主导**：便于继续细分、编辑与后续仿真前处理。
+- **Skeleton-driven explicit meshing:** RMF tube walls, Y-strips or convex transitions at forks, soma spheres joined to primary branches, edge-occupancy checks for a watertight manifold.
+- **Controllable convolution constraints:** A fusion field from the same skeleton and radii; finite / variable support limits over-blending; after subdivision, vertices are pulled to the isosurface along the field gradient to reduce inflate/shrink from pure subdivision.
+- **Quad-dominant output:** Suited to further subdivision, editing, and simulation preprocessing.
 
-## 目录结构
+## Layout
 
 ```
 QuadMeshTesser/
   app/              # GUI
-  quadmeshtesser/   # 核心库
-  data/             # 示例 SWC / 参考网格
-  scripts/          # 测试与基准脚本
-  workflow.png      # 流程图
+  quadmeshtesser/   # Core library
+  data/             # Sample SWC / reference meshes
+  scripts/          # Tests and benchmarks
+  workflow.png      # Pipeline figure
 ```
 
-## 命令行调用示例
+## Programmatic example
 
 ```python
 from pathlib import Path
