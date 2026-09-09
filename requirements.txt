@@ -1,0 +1,10 @@
+numpy>=1.24,<2
+pandas>=2.0
+scipy>=1.10,<1.14
+numba>=0.58
+# Optional GPU (CUDA 12, numpy<2): run install_gpu.bat or:
+# pip install "cupy-cuda12x>=13.3,<14"
+PyQt5>=5.15
+qtpy>=2.4
+pyvista>=0.43
+pyvistaqt>=0.11

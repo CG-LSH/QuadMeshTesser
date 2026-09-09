@@ -1,0 +1,29 @@
+[project]
+name = "quadmeshtesser"
+version = "0.1.0"
+description = "SWC tree skeleton to quadrilateral mesh via convolution surface projection"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scipy>=1.10",
+  "PyQt5>=5.15",
+  "qtpy>=2.4",
+  "pyvista>=0.43",
+  "pyvistaqt>=0.11",
+]
+
+[project.scripts]
+quadmeshtesser = "app.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quadmeshtesser*", "app*"]
+
+[tool.setuptools.package-data]
+quadmeshtesser = ["data/*.swc"]
