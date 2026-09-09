@@ -1,6 +1,10 @@
 # QuadMeshTesser
 
-SWC 树形骨架 → **四边形 mesh** 的 Python 独立项目，复现 ConvolutionProject 中 BLT 树形管线核心思路，卷积公式参考 [morphtesser](D:/morphtesser)。
+SWC 树形骨架 → **四边形 mesh** 的 Python 独立项目，复现 ConvolutionProject 中 BLT 树形管线核心思路，卷积公式参考 morphtesser。
+
+![QuadMeshTesser workflow](workflow.png)
+
+*总体流程示意：SWC 预处理 → RMF 四边形扫掠 → 分叉/胞体衔接 → 细分 → 卷积等值面投影。*
 
 ## 功能
 
