@@ -33,13 +33,16 @@ from quadmeshtesser.cpp_constants import (
     CPP_DEFAULT_BOUND_SCALE,
     CPP_DEFAULT_CONNECT_BRANCH_JUNCTION,
     CPP_DEFAULT_INSERT_ASSIST,
+    CPP_DEFAULT_KERNEL,
     CPP_DEFAULT_SUBDIV_LEVELS,
+    POST_PROJECT_SMOOTH_ITERS,
     CPP_DEFAULT_SUB_LMT_CNT,
     CPP_DEFAULT_SWEEP_ONLY,
     CPP_DEFAULT_USE_LMT_CNT,
     DEFAULT_CAUCHY_PROJ_ISO,
     DEFAULT_QUARTIC_ISO,
     MAX_APPR_ITER,
+    CPP_DEFAULT_PROJECT_ITERS,
 )
 from quadmeshtesser.export_obj import export_obj, mesh_to_pyvista_faces
 from quadmeshtesser.mesh_viz import split_root_soma_mesh
@@ -122,21 +125,9 @@ class MainWindow(QMainWindow):
         self._radius_scale.setSingleStep(0.1)
         form.addRow("半径缩放", self._radius_scale)
 
-        self._bound_scale = QDoubleSpinBox()
-        self._bound_scale.setRange(0.5, 8.0)
-        self._bound_scale.setValue(CPP_DEFAULT_BOUND_SCALE)
-        self._bound_scale.setSingleStep(0.1)
-        self._bound_scale.setToolTip("CreateBoundSweep 缩放 (C++ m_fBoundScale)")
-        form.addRow("扫掠缩放", self._bound_scale)
-
-        self._insert_assist = QCheckBox("分支辅助点 (InsertAssist)")
-        self._insert_assist.setChecked(CPP_DEFAULT_INSERT_ASSIST)
-        self._insert_assist.setToolTip("分支处插入辅助点并启用 EBTT_Scaled 扫掠 (bound×radius)")
-        form.addRow(self._insert_assist)
-
-        self._sweep_only = QCheckBox("仅扫掠管道 (BLT 初始四边形 mesh)")
+        self._sweep_only = QCheckBox("仅初始 mesh")
         self._sweep_only.setChecked(CPP_DEFAULT_SWEEP_ONLY)
-        self._sweep_only.setToolTip("沿 SWC 每段骨架扫掠四边形管道；跳过后续细分/卷积/投影")
+        self._sweep_only.setToolTip("只生成初始扫掠网格；跳过细分 / 卷积 / 投影")
         self._sweep_only.toggled.connect(self._on_sweep_only_changed)
         form.addRow(self._sweep_only)
 
@@ -169,81 +160,61 @@ class MainWindow(QMainWindow):
         )
         form.addRow(self._swc_preprocess)
 
-        self._restore_offset = QCheckBox("恢复半径偏移 (OffsetSurf)")
-        self._restore_offset.setToolTip("投影后按场加权沿法向恢复 SWC 半径")
-        form.addRow(self._restore_offset)
-
-        ref_row = QHBoxLayout()
-        self._ref_obj_label = QLabel("（无）")
-        self._ref_obj_label.setWordWrap(True)
-        btn_ref_obj = QPushButton("参考 OBJ…")
-        btn_ref_obj.setToolTip("CreateOffset 用外部三角 mesh；留空则用细分 mesh")
-        btn_ref_obj.clicked.connect(self._pick_ref_obj)
-        ref_row.addWidget(self._ref_obj_label, 1)
-        ref_row.addWidget(btn_ref_obj)
-        form.addRow("Offset 参考", ref_row)
-        self._ref_obj_path: Path | None = None
-
-        self._offset_mode = QComboBox()
-        self._offset_mode.addItems(["segment", "branch", "combined"])
-        self._offset_mode.setToolTip("FieldOffset_Segment / Branch / 组合")
-        form.addRow("Offset 模式", self._offset_mode)
-
         layout.addWidget(param_box)
 
         conv_box = QGroupBox("卷积曲面")
         conv_form = QFormLayout(conv_box)
 
         self._appr_style = QComboBox()
-        self._appr_style.addItems(
-            ["morphtesser", "local", "limit", "metaball", "metaball_line"]
+        for value, label in (
+            ("local", "线积分卷积 (local)"),
+            ("morphtesser", "MorphTesser 卷积"),
+            ("limit", "仅细分 (limit)"),
+            ("metaball", "Metaball 点元"),
+            ("metaball_line", "Metaball 线骨架"),
+        ):
+            self._appr_style.addItem(label, value)
+        _appr_choices = ("local", "morphtesser", "limit", "metaball", "metaball_line")
+        idx = self._appr_style.findData(
+            CPP_DEFAULT_APPR_STYLE if CPP_DEFAULT_APPR_STYLE in _appr_choices else "local"
         )
-        _appr_choices = ("morphtesser", "local", "limit", "metaball", "metaball_line")
-        self._appr_style.setCurrentText(
-            CPP_DEFAULT_APPR_STYLE
-            if CPP_DEFAULT_APPR_STYLE in _appr_choices
-            else "morphtesser"
+        self._appr_style.setCurrentIndex(idx if idx >= 0 else 0)
+        self._appr_style.currentIndexChanged.connect(
+            lambda _: self._on_appr_style_changed(self._appr_style_value())
         )
-        self._appr_style.currentTextChanged.connect(self._on_appr_style_changed)
         self._appr_style.setToolTip(
-            "morphtesser=MorphTesser 卷积场 iso=0.5; "
-            "local=线积分投影; limit=仅细分不投影(EAS_Limit); "
-            "metaball=点元; metaball_line=线骨架+Cauchy+Metaball iso"
+            "local=线积分卷积；morphtesser=MorphTesser；limit=仅细分；"
+            "metaball=点元；metaball_line=线骨架 Metaball"
         )
         conv_form.addRow("逼近方式", self._appr_style)
 
-        self._weight_mode = QComboBox()
-        self._weight_mode.addItems(["local", "global"])
-        self._weight_mode.setToolTip("local=CreateConvLineSkel_Local; global=NNLS_Global")
-        conv_form.addRow("权重模式", self._weight_mode)
-
-        self._smooth_weights = QCheckBox("平滑全局权重 (SmoothWts)")
-        conv_form.addRow(self._smooth_weights)
-
-        self._use_lmt_cnt = QCheckBox("Limit 细分缩放 (use_lmt_cnt)")
-        self._use_lmt_cnt.setChecked(CPP_DEFAULT_USE_LMT_CNT)
-        self._use_lmt_cnt.setToolTip("EAS_Limit 默认启用；Limit_Global/Local 亦需勾选")
-        conv_form.addRow(self._use_lmt_cnt)
-
-        self._sub_lmt_cnt = QSpinBox()
-        self._sub_lmt_cnt.setRange(0, 3)
-        self._sub_lmt_cnt.setValue(CPP_DEFAULT_SUB_LMT_CNT)
-        self._sub_lmt_cnt.setToolTip("0=与 Catmull-Clark 级数相同")
-        conv_form.addRow("Limit 级数", self._sub_lmt_cnt)
-
         self._kernel = QComboBox()
-        self._kernel.addItems(["cauchy", "quartic"])
-        self._kernel.setCurrentText("cauchy")
-        self._kernel.currentTextChanged.connect(self._on_kernel_changed)
+        self._kernel.addItem("有限核 quartic", "quartic")
+        self._kernel.addItem("无限核 cauchy", "cauchy")
+        kidx = self._kernel.findData(CPP_DEFAULT_KERNEL)
+        self._kernel.setCurrentIndex(kidx if kidx >= 0 else 0)
+        self._kernel.currentIndexChanged.connect(
+            lambda _: self._on_kernel_changed(self._kernel_value())
+        )
+        self._kernel.setToolTip("有限核=紧支撑 quartic；无限核=Cauchy")
         conv_form.addRow("核函数", self._kernel)
 
         self._iso = QDoubleSpinBox()
         self._iso.setRange(1e-6, 1e6)
         self._iso.setDecimals(6)
-        self._iso.setValue(DEFAULT_CAUCHY_PROJ_ISO)
+        _default_iso = (
+            DEFAULT_MORPH_ISO
+            if CPP_DEFAULT_APPR_STYLE == "morphtesser"
+            else (
+                DEFAULT_QUARTIC_ISO
+                if CPP_DEFAULT_KERNEL == "quartic"
+                else DEFAULT_CAUCHY_PROJ_ISO
+            )
+        )
+        self._iso.setValue(_default_iso)
         self._iso.setToolTip(
             "等值面 F(p)=iso；MorphTesser 默认 0.5；"
-            "BLT Cauchy 默认 m_dCauchyIso×5，Quartic 默认 m_dQuarticIso"
+            "线积分：Cauchy 用 m_dCauchyIso×5，Quartic 用 m_dQuarticIso"
         )
         conv_form.addRow("等值 iso", self._iso)
 
@@ -251,7 +222,7 @@ class MainWindow(QMainWindow):
         self._metaball_iso.setRange(0.01, 10.0)
         self._metaball_iso.setDecimals(4)
         self._metaball_iso.setValue(DEFAULT_METABALL_ISO)
-        self._metaball_iso.setToolTip("Metaball 模式 iso (默认 0.7)")
+        self._metaball_iso.setToolTip("Metaball / metaball_line 模式的等值阈值")
         conv_form.addRow("Metaball iso", self._metaball_iso)
 
         self._project = QCheckBox("投影到等值面")
@@ -259,20 +230,33 @@ class MainWindow(QMainWindow):
             not CPP_DEFAULT_SWEEP_ONLY
             and CPP_DEFAULT_APPR_STYLE in ("local", "morphtesser")
         )
-        self._project.setToolTip("EAS_Limit 默认关闭；local/limit&* 模式需开启")
+        self._project.setToolTip("关闭则只细分；limit 模式会自动关闭投影")
         conv_form.addRow(self._project)
-
-        self._project_backend = QComboBox()
-        self._project_backend.addItems(["numba", "auto", "cupy", "serial"])
-        self._project_backend.setCurrentText("numba")
-        self._project_backend.setToolTip(
-            "推荐 numba；auto 优先 Numba；cupy 需 CUDA 且大网格才可能有收益"
+        self._project_selective = QCheckBox("只逼近偏差大的顶点")
+        self._project_selective.setChecked(True)
+        self._project_selective.setToolTip(
+            "场/位移已经接近等值面的顶点保持细分后的光滑位置；"
+            "偏差大的才投影，并限制单步最大位移，减轻投影后网格质量下降"
         )
-        conv_form.addRow("投影后端", self._project_backend)
+        conv_form.addRow(self._project_selective)
+
+        self._project_move_tol = QDoubleSpinBox()
+        self._project_move_tol.setRange(0.05, 2.0)
+        self._project_move_tol.setSingleStep(0.05)
+        self._project_move_tol.setValue(0.45)
+        self._project_move_tol.setToolTip("||投影位移|| / 局部边长 低于此值则不逼近（软过渡到 2×）")
+        conv_form.addRow("逼近位移阈值", self._project_move_tol)
+        self._post_smooth_iters = QSpinBox()
+        self._post_smooth_iters.setRange(0, 20)
+        self._post_smooth_iters.setValue(POST_PROJECT_SMOOTH_ITERS)
+        self._post_smooth_iters.setToolTip("投影后 Taubin 平滑次数（0=关闭）；用于校准网格质量、减轻锯齿")
+        conv_form.addRow("投影后平滑", self._post_smooth_iters)
+
+
 
         self._proj_iters = QSpinBox()
         self._proj_iters.setRange(1, 100)
-        self._proj_iters.setValue(MAX_APPR_ITER)
+        self._proj_iters.setValue(CPP_DEFAULT_PROJECT_ITERS)
         conv_form.addRow("投影迭代", self._proj_iters)
 
         self._proj_step = QDoubleSpinBox()
@@ -294,7 +278,7 @@ class MainWindow(QMainWindow):
         self._show_skel.setToolTip("细线骨架；默认关闭，避免生成时逐段 tube/sphere 渲染卡顿")
         self._show_skel.toggled.connect(lambda _: self._refresh_view())
         self._show_wire = QCheckBox("四边形线框")
-        self._show_wire.setChecked(False)
+        self._show_wire.setChecked(True)
         self._show_wire.toggled.connect(lambda _: self._refresh_view())
         self._show_surf = QCheckBox("显示曲面")
         self._show_surf.setChecked(True)
@@ -307,9 +291,9 @@ class MainWindow(QMainWindow):
             "关闭：全部仅显示朝向相机的一面（默认）"
         )
         self._see_backfaces.toggled.connect(lambda _: self._refresh_view())
-        self._show_iso_surf = QCheckBox("显示目标卷积面点云")
+        self._show_iso_surf = QCheckBox("显示目标卷积等值面")
         self._show_iso_surf.setChecked(False)
-        self._show_iso_surf.setToolTip("MorphTesser iso 等值面采样点（平面点渲染，非球体点云）")
+        self._show_iso_surf.setToolTip("真实投影卷积场等值面 F(p)=iso（与投影同一场）；骨架径向环+二分求根，非半径管粗预览")
         self._show_iso_surf.toggled.connect(lambda _: self._refresh_view())
         vis_layout.addWidget(self._show_skel)
         vis_layout.addWidget(self._show_wire)
@@ -343,18 +327,25 @@ class MainWindow(QMainWindow):
         if self._swc_path and self._swc_path.is_file():
             self._generate()
 
+    def _appr_style_value(self) -> str:
+        v = self._appr_style.currentData()
+        return str(v) if v else "local"
+
+    def _kernel_value(self) -> str:
+        v = self._kernel.currentData()
+        return str(v) if v else "quartic"
+
     def _on_sweep_only_changed(self, checked: bool) -> None:
         self._conv_box.setEnabled(not checked)
         self._subdiv.setEnabled(not checked)
         if checked:
             self._subdiv.setValue(0)
             self._project.setChecked(False)
-            self._use_lmt_cnt.setChecked(False)
         else:
             if self._subdiv.value() == 0:
                 self._subdiv.setValue(CPP_DEFAULT_SUBDIV_LEVELS)
-            self._on_appr_style_changed(self._appr_style.currentText())
-        self._btn_gen.setText("生成扫掠 Mesh" if checked else "生成四边形 Mesh")
+            self._on_appr_style_changed(self._appr_style_value())
+        self._btn_gen.setText("生成初始 Mesh" if checked else "生成四边形 Mesh")
 
     def _settings(self) -> QSettings:
         return QSettings()
@@ -411,59 +402,61 @@ class MainWindow(QMainWindow):
             return
         if style == "limit":
             self._project.setChecked(False)
-            self._use_lmt_cnt.setChecked(True)
-        elif style in ("local", "metaball", "metaball_line", "morphtesser"):
+        elif style in ("local", "morphtesser", "metaball", "metaball_line"):
             self._project.setChecked(True)
+        is_metaball = style in ("metaball", "metaball_line")
+        self._metaball_iso.setEnabled(is_metaball)
         if style == "morphtesser":
             self._iso.setValue(DEFAULT_MORPH_ISO)
-        elif style == "local" and self._kernel.currentText() == "cauchy":
-            self._iso.setValue(DEFAULT_CAUCHY_PROJ_ISO)
+            self._kernel.setEnabled(False)
+        elif is_metaball:
+            self._kernel.setEnabled(style == "metaball_line")
+            self._iso.setValue(self._metaball_iso.value())
+        else:
+            self._kernel.setEnabled(True)
+            self._on_kernel_changed(self._kernel_value())
 
     def _on_kernel_changed(self, kernel: str) -> None:
+        if self._appr_style_value() == "morphtesser":
+            return
         self._iso.setValue(
             DEFAULT_CAUCHY_PROJ_ISO if kernel == "cauchy" else DEFAULT_QUARTIC_ISO
         )
 
-    def _pick_ref_obj(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择参考 OBJ", str(Path.cwd()), "OBJ (*.obj);;All (*.*)"
-        )
-        if path:
-            self._ref_obj_path = Path(path)
-            self._ref_obj_label.setText(self._ref_obj_path.name)
-        else:
-            self._ref_obj_path = None
-            self._ref_obj_label.setText("（无）")
-
     def _params(self) -> PipelineParams:
-        ref = str(self._ref_obj_path) if self._ref_obj_path else None
         return PipelineParams(
             sides=self._sides.value(),
             subdiv_levels=self._subdiv.value(),
             radius_scale=self._radius_scale.value(),
-            bound_scale=self._bound_scale.value(),
-            insert_assist=self._insert_assist.isChecked(),
-            bound_tet_scaled=self._insert_assist.isChecked(),
+            bound_scale=CPP_DEFAULT_BOUND_SCALE,
+            insert_assist=CPP_DEFAULT_INSERT_ASSIST,
+            bound_tet_scaled=CPP_DEFAULT_INSERT_ASSIST,
             sweep_only=self._sweep_only.isChecked(),
             swc_preprocess=self._swc_preprocess.isChecked(),
             branch_junction=self._branch_junction.currentData() or DEFAULT_BRANCH_JUNCTION.value,
             connect_branch_junction=self._connect_branch.isChecked(),
-            restore_offset=self._restore_offset.isChecked() and not self._sweep_only.isChecked(),
-            ref_obj_path=ref,
-            offset_mode=self._offset_mode.currentText(),
-            weight_mode=self._weight_mode.currentText(),
-            smooth_weights=self._smooth_weights.isChecked(),
-            use_lmt_cnt=self._use_lmt_cnt.isChecked(),
-            sub_lmt_cnt=self._sub_lmt_cnt.value(),
-            appr_style=self._appr_style.currentText(),
-            kernel=self._kernel.currentText(),
+            restore_offset=False,
+            ref_obj_path=None,
+            offset_mode="segment",
+            weight_mode="local",
+            smooth_weights=False,
+            use_lmt_cnt=False,
+            sub_lmt_cnt=CPP_DEFAULT_SUB_LMT_CNT,
+            appr_style=self._appr_style_value(),
+            kernel=self._kernel_value(),
             iso_value=self._iso.value(),
             metaball_iso=self._metaball_iso.value(),
             metaball_interval=DEFAULT_METABALL_INTERVAL,
             project=self._project.isChecked(),
-            project_backend=self._project_backend.currentText(),
+            sample_iso_surface=self._show_iso_surf.isChecked() and self._project.isChecked(),
+            project_backend="numba",
             project_iters=self._proj_iters.value(),
             project_step=self._proj_step.value(),
+            project_selective=self._project_selective.isChecked(),
+            project_move_tol=self._project_move_tol.value(),
+            project_rel_tol=0.12,
+            project_move_cap=0.85,
+            post_project_smooth_iters=self._post_smooth_iters.value(),
         )
 
     def _load_swc(self) -> None:
@@ -510,7 +503,7 @@ class MainWindow(QMainWindow):
                 )
             sk = self._result.skeleton
             n_branch = sum(1 for nid, ch in sk.children.items() if len(ch) > 1)
-            stage = "扫掠管道" if self._result.params.sweep_only else "完整管线"
+            stage = "初始 mesh" if self._result.params.sweep_only else "完整管线"
             junction = branch_junction_label(
                 parse_branch_junction(self._result.params.branch_junction)
             )
@@ -577,22 +570,35 @@ class MainWindow(QMainWindow):
         if self._show_skel.isChecked():
             add_joint_skeleton_wire_to_plotter(self._plotter, self._result.root)
 
-        if (
-            self._show_iso_surf.isChecked()
-            and self._result.iso_surface_points is not None
-        ):
-            pts = self._result.iso_surface_points
-            if len(pts) > 0:
-                cloud = pv.PolyData(np.asarray(pts, dtype=np.float64))
-                self._plotter.add_mesh(
-                    cloud,
-                    style="points",
-                    point_size=3,
-                    render_points_as_spheres=False,
-                    color="#06d6a0",
-                    opacity=0.65,
-                    name="iso_surface",
-                )
+        if self._show_iso_surf.isChecked() and self._result is not None:
+            iso_mesh = getattr(self._result, "iso_surface_mesh", None)
+            if iso_mesh is not None and (
+                getattr(iso_mesh, "n_quads", 0) > 0 or getattr(iso_mesh, "n_triangles", 0) > 0
+            ):
+                verts, faces = mesh_to_pyvista_faces(iso_mesh)
+                if len(faces) > 0:
+                    surf = pv.PolyData(verts, faces)
+                    self._plotter.add_mesh(
+                        surf,
+                        color="#06d6a0",
+                        opacity=0.35,
+                        smooth_shading=True,
+                        specular=0.15,
+                        name="iso_surface",
+                    )
+            elif self._result.iso_surface_points is not None:
+                pts = self._result.iso_surface_points
+                if len(pts) > 0:
+                    cloud = pv.PolyData(np.asarray(pts, dtype=np.float64))
+                    self._plotter.add_mesh(
+                        cloud,
+                        style="points",
+                        point_size=3,
+                        render_points_as_spheres=False,
+                        color="#06d6a0",
+                        opacity=0.65,
+                        name="iso_surface",
+                    )
 
         body_mesh, root_mesh = split_root_soma_mesh(self._result.mesh, self._result.root)
         show_surf = self._show_surf.isChecked()

@@ -6,6 +6,7 @@ import math
 
 import numpy as np
 
+from quadmeshtesser.cpp_constants import NORMALIZE_EPSILON
 from quadmeshtesser.joint import Joint, _cross, _dot, _normalize, _v3
 
 Vec3 = np.ndarray
@@ -27,7 +28,7 @@ def transport_vector(r: Vec3, t_from: Vec3, t_to: Vec3) -> Vec3:
     t1 = _normalize(t_to)
     r = r - t0 * _dot(r, t0)
     rn = float(np.linalg.norm(r))
-    if rn < 1e-15:
+    if rn < NORMALIZE_EPSILON:
         ref = _v3(0.0, 0.0, 1.0) if abs(_dot(t1, _v3(0, 0, 1))) < 0.9 else _v3(1.0, 0.0, 0.0)
         r = _normalize(_cross(t1, ref))
     else:
@@ -42,7 +43,7 @@ def transport_vector(r: Vec3, t_from: Vec3, t_to: Vec3) -> Vec3:
 
     axis = _cross(t0, t1)
     ax_n = float(np.linalg.norm(axis))
-    if ax_n < 1e-15:
+    if ax_n < NORMALIZE_EPSILON:
         return _normalize(r)
     axis /= ax_n
     angle = math.acos(c)
@@ -61,7 +62,7 @@ def _init_frame(tangent: Vec3, init_rot: float) -> tuple[Vec3, Vec3, Vec3]:
         ref = _v3(1.0, 0.0, 0.0)
     y = _normalize(_cross(t, ref))
     z = _normalize(_cross(t, y))
-    if abs(init_rot) > 1e-15:
+    if abs(init_rot) > NORMALIZE_EPSILON:
         c, s = math.cos(init_rot), math.sin(init_rot)
         y, z = y * c + z * s, y * (-s) + z * c
         y, z = _normalize(y), _normalize(z)
@@ -86,7 +87,7 @@ def apply_rmf_frames(root: Joint, init_rot: float = 0.0) -> None:
             y = transport_vector(y_ref, t_ref, t)
             y = y - t * _dot(y, t)
             yn = float(np.linalg.norm(y))
-            if yn < 1e-15:
+            if yn < NORMALIZE_EPSILON:
                 y = _normalize(_cross(t, _v3(0.0, 0.0, 1.0)))
             else:
                 y = y / yn
@@ -98,10 +99,10 @@ def apply_rmf_frames(root: Joint, init_rot: float = 0.0) -> None:
         j.axis[2] = z.copy()
 
         for ch in reversed(j.children):
-            t_edge = _normalize(ch.offset)
-            ey = transport_vector(j.axis[1], j.axis[0], t_edge)
-            ez = transport_vector(j.axis[2], j.axis[0], t_edge)
-            stack.append((ch, ey, ez, j.axis[0]))
+            # Single transport at the child: pass parent frame + parent tangent.
+            # Pre-transporting onto t_edge while still passing t_ref=parent.axis[0]
+            # double-applies parallel transport and accumulates twist at bends/forks.
+            stack.append((ch, j.axis[1].copy(), j.axis[2].copy(), j.axis[0].copy()))
 
 
 def ring_align_offset(
@@ -302,7 +303,7 @@ def ring_axes_for_spoke(joint: Joint, direction: Vec3) -> tuple[Vec3, Vec3]:
     y = transport_vector(joint.axis[1], joint.axis[0], d)
     y = y - d * _dot(y, d)
     yn = float(np.linalg.norm(y))
-    if yn < 1e-15:
+    if yn < NORMALIZE_EPSILON:
         y = _normalize(_cross(d, joint.axis[2]))
     else:
         y = y / yn

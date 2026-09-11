@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,7 +17,7 @@ from quadmeshtesser.branch_convex import (
     append_layout_branch_junction_faces,
     bound_sweep_scale,
 )
-from quadmeshtesser.joint import apply_branch_radius_limits
+from quadmeshtesser.joint import apply_branch_radius_limits, apply_curvature_radius_limits
 from quadmeshtesser.cpp_constants import CPP_DEFAULT_CONNECT_BRANCH_JUNCTION, SWEEP_VERT_CNT
 from quadmeshtesser.joint import Joint
 from quadmeshtesser.junction_methods import DEFAULT_BRANCH_JUNCTION, JunctionMethod
@@ -149,6 +151,64 @@ def _add_pipe_side_quads(
     )
 
 
+
+def _append_leaf_hemisphere_tips(
+    root: Joint,
+    quads: list[list[int]],
+    tris: list[list[int]],
+    verts: np.ndarray,
+) -> np.ndarray:
+    """Replace flat leaf end-caps with a collar ring + tip pole (hemisphere-ish).
+
+    Flat 4-gons become blocky under Catmull-Clark; a mid collar + polar tip
+    subdivides into a much rounder terminal.
+    """
+    u = SWEEP_VERT_CNT
+    vlist = [np.asarray(p, dtype=np.float64).copy() for p in verts]
+
+    def _norm(v: np.ndarray) -> np.ndarray:
+        n = float(np.linalg.norm(v))
+        if n < 1e-15:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        return v / n
+
+    for j in root.iter_all():
+        if j.children or j.bound_sweep_id < 0:
+            continue
+        base = j.bound_sweep_id * u
+        ring = [base + i for i in range(u)]
+        center = np.asarray(j.pos, dtype=np.float64)
+        if j.parent is not None:
+            tdir = _norm(np.asarray(j.offset, dtype=np.float64))
+        else:
+            tdir = _norm(np.asarray(j.axis[0], dtype=np.float64))
+        radial0 = vlist[ring[0]] - center
+        radial0 = radial0 - tdir * float(np.dot(radial0, tdir))
+        r = float(np.linalg.norm(radial0))
+        if r < 1e-12:
+            r = float(j.effective_sweep_radius())
+        ang = math.pi * 0.25
+        ca, sa = math.cos(ang), math.sin(ang)
+        collar_ids: list[int] = []
+        for i in range(u):
+            pr = vlist[ring[i]] - center
+            pr = pr - tdir * float(np.dot(pr, tdir))
+            pr = _norm(pr)
+            pt = center + pr * (r * ca) + tdir * (r * sa)
+            collar_ids.append(len(vlist))
+            vlist.append(pt)
+        tip_id = len(vlist)
+        vlist.append(center + tdir * r)
+        for i in range(u):
+            i2 = (i + 1) % u
+            quads.append([ring[i], ring[i2], collar_ids[i2], collar_ids[i]])
+        for i in range(u):
+            i2 = (i + 1) % u
+            tris.append([collar_ids[i], collar_ids[i2], tip_id])
+
+    return np.asarray(vlist, dtype=np.float64)
+
+
 def _add_quads(
     root: Joint,
     quads: list[list[int]],
@@ -165,8 +225,8 @@ def _add_quads(
     set: no planar cap quads on ring vertices. Junction loft strips then supply
     the second face on each ring edge (manifold count = 2).
 
-    Terminal branch endpoints (leaf joints) always receive a planar cap quad so
-    the bound_sweep ring is closed.
+    Terminal branch endpoints (leaf joints) are closed later by
+    ``_append_leaf_hemisphere_tips`` (collar + pole) for smoother subdivision.
     """
     from quadmeshtesser.branch_ring_layout import branch_hull_stores_upstream
 
@@ -181,8 +241,8 @@ def _add_quads(
         ):
             quads.append([j.bound_sweep_id * u + i for i in range(u)])
 
-        if not j.children and j.bound_sweep_id >= 0:
-            quads.append([j.bound_sweep_id * u + i for i in (3, 2, 1, 0)])
+        # Leaf planar caps omitted: rounded hemisphere tips are added later
+        # (_append_leaf_hemisphere_tips) so Catmull-Clark produces smooth ends.
 
         if j.parent is not None and len(j.parent.children) == 1 and len(j.children) <= 1:
             skip = use_root_hull and j.parent.parent is None
@@ -669,6 +729,7 @@ def build_polyhedron_surface(
         root,
         f_scale=f_scale if bound_tet_scaled else 1.0,
     )
+    apply_curvature_radius_limits(root)
     root.create_bound_sweep(
         bound_scale,
         use_lmt_cnt,
@@ -719,6 +780,7 @@ def build_polyhedron_surface(
         use_rmf=True,
         hollow_ring_caps=connect_branch_junction,
     )
+    verts = _append_leaf_hemisphere_tips(root, quads, tris, verts)
     if use_root_sphere and root.children:
         _add_root_stem_quads(root, quads, verts, use_rmf=True)
 

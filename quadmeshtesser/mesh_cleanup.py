@@ -6,7 +6,7 @@ import numpy as np
 
 from quadmeshtesser.meshgen import QuadMesh
 
-__all__ = ["remove_degenerate_faces", "cleanup_quad_mesh"]
+__all__ = ["remove_degenerate_faces", "cleanup_quad_mesh", "taubin_smooth_mesh"]
 
 
 def _edge_len(vertices: np.ndarray, a: int, b: int) -> float:
@@ -68,3 +68,67 @@ def cleanup_quad_mesh(mesh: QuadMesh, *, weld_tol: float = 0.0) -> QuadMesh:
     if weld_tol > 0.0:
         cleaned = cleaned.weld(weld_tol)
     return cleaned
+
+
+
+def taubin_smooth_mesh(
+    mesh: QuadMesh,
+    *,
+    iterations: int = 3,
+    lam: float = 0.33,
+    mu: float = -0.34,
+) -> QuadMesh:
+    """Taubin smooth (λ/μ Laplacian) to reduce projection jitter while limiting shrinkage.
+
+    Vectorized uniform Laplacian on the quad/triangle edge graph. Keep iterations small
+    (2–5) after projection.
+    """
+    iterations = int(max(0, iterations))
+    if iterations == 0 or mesh.n_vertices == 0:
+        return mesh
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64).copy()
+    n = len(verts)
+    edges: list[tuple[int, int]] = []
+
+    def add_cycle(face: np.ndarray) -> None:
+        m = len(face)
+        for i in range(m):
+            a = int(face[i])
+            b = int(face[(i + 1) % m])
+            if a == b or a < 0 or b < 0 or a >= n or b >= n:
+                continue
+            if a > b:
+                a, b = b, a
+            edges.append((a, b))
+
+    for q in mesh.quads:
+        add_cycle(q)
+    for t in mesh.triangles:
+        add_cycle(t)
+    if not edges:
+        return mesh
+
+    # unique undirected edges
+    er = np.asarray(edges, dtype=np.int64)
+    er = np.unique(er, axis=0)
+    a = er[:, 0]
+    b = er[:, 1]
+    # degree
+    deg = np.zeros(n, dtype=np.float64)
+    np.add.at(deg, a, 1.0)
+    np.add.at(deg, b, 1.0)
+    deg = np.maximum(deg, 1.0)
+
+    def laplacian_step(v: np.ndarray, amount: float) -> np.ndarray:
+        acc = np.zeros_like(v)
+        np.add.at(acc, a, v[b])
+        np.add.at(acc, b, v[a])
+        mean = acc / deg[:, None]
+        return v + amount * (mean - v)
+
+    for _ in range(iterations):
+        verts = laplacian_step(verts, float(lam))
+        verts = laplacian_step(verts, float(mu))
+
+    return QuadMesh(verts, mesh.quads.copy(), mesh.triangles.copy())

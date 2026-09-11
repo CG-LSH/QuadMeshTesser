@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from quadmeshtesser.cpp_constants import (
+    LENGTH_EPSILON,
+    NORMALIZE_EPSILON,
+    RADIUS_EPSILON,
+)
 from quadmeshtesser.swc_io import SwcNode
 
 __all__ = [
@@ -17,6 +22,7 @@ __all__ = [
     "compute_adaptive_radius_floor",
     "load_swc_nodes",
     "preprocess_swc",
+    "validate_swc_early",
 ]
 
 
@@ -53,6 +59,50 @@ class PreprocessConfig:
     radius_floor_max_spread: float = 15.0
     radius_floor_median_cap: float = 0.22
     radius_floor_mean_cap: float = 0.28
+    densify_high_curvature: bool = False
+    curvature_radius_factor: float = 1.5
+    curvature_min_turn: float = 0.12
+    curvature_max_turn_per_sample: float = 0.45
+
+
+
+def validate_swc_early(nodes: list[SwcNode], *, min_radius: float = 0.01) -> list[str]:
+    """Early warnings for pathological SWC (tiny radii / near-zero edges).
+
+    Returns warnings (may be empty). Raises ValueError if *nodes* is empty.
+    """
+    warnings: list[str] = []
+    if not nodes:
+        raise ValueError("SWC file contains no nodes")
+
+    tiny_radii = [n for n in nodes if 0.0 < float(n.r) < RADIUS_EPSILON]
+    if tiny_radii:
+        warnings.append(
+            f"Found {len(tiny_radii)} nodes with extremely small radii "
+            f"(< {RADIUS_EPSILON:.1e}); they will be clamped toward "
+            f"min_radius={min_radius}."
+        )
+
+    by_id = {n.id: n for n in nodes}
+    zero_edges: list[int] = []
+    for n in nodes:
+        parent = by_id.get(n.parent)
+        if parent is None:
+            continue
+        dist = (
+            (n.x - parent.x) ** 2
+            + (n.y - parent.y) ** 2
+            + (n.z - parent.z) ** 2
+        ) ** 0.5
+        if dist < LENGTH_EPSILON:
+            zero_edges.append(n.id)
+    if zero_edges:
+        warnings.append(
+            f"Found {len(zero_edges)} near-zero-length edges "
+            f"(< {LENGTH_EPSILON:.1e}); preprocessing will attempt to "
+            "simplify or separate these."
+        )
+    return warnings
 
 
 @dataclass
@@ -74,6 +124,7 @@ class PreprocessStats:
     max_overlap_after: float = 0.0
     radius_floor: float = 0.0
     radius_clamped: int = 0
+    curvature_densified: int = 0
     radius_min_before: float = 0.0
     radius_mean_before: float = 0.0
     warnings: list[str] = field(default_factory=list)
@@ -124,7 +175,7 @@ def compute_adaptive_radius_floor(
     r_p05 = float(np.percentile(pos, 5.0))
     r_p10 = float(np.percentile(pos, 10.0))
 
-    spread = r_max / max(r_min, 1e-9)
+    spread = r_max / max(r_min, RADIUS_EPSILON)
     floor = max(
         float(min_absolute),
         r_mean * mean_ratio,
@@ -579,9 +630,25 @@ def _prune_inside_soma(
     soma_id: int,
     cfg: PreprocessConfig,
     stats: PreprocessStats,
+    *,
+    max_iterations: int = 1000,
 ) -> None:
     """Delete nodes whose spheres lie inside the primary soma; reparent children."""
+    iteration = 0
     while True:
+        if iteration >= max_iterations:
+            remaining = sum(
+                1
+                for nid in nodes
+                if nid != soma_id
+                and _node_inside_soma(nid, soma_id, nodes, cfg.overlap_margin)
+            )
+            raise RuntimeError(
+                f"_prune_inside_soma exceeded {max_iterations} iterations "
+                f"(soma_id={soma_id}, remaining_inside={remaining}, "
+                f"n_nodes={len(nodes)}). Pathological SWC structure suspected."
+            )
+        iteration += 1
         depths: dict[int, int] = {}
         stack: list[tuple[int, int]] = [(soma_id, 0)]
         while stack:
@@ -843,9 +910,19 @@ def _simplify_joint(
     children: dict[int, list[int]],
     cfg: PreprocessConfig,
     stats: PreprocessStats,
+    *,
+    max_iterations: int = 1000,
 ) -> None:
     """Port of CBltRegulator::SimplifyJoint (post-order, iterative)."""
+    iteration = 0
     while True:
+        if iteration >= max_iterations:
+            raise RuntimeError(
+                f"_simplify_joint exceeded {max_iterations} iterations "
+                f"(root_id={root_id}, n_nodes={len(nodes)}). "
+                "Pathological SWC structure or non-converging simplify suspected."
+            )
+        iteration += 1
         any_del = False
         for nid in _iter_postorder(root_id, nodes, children):
             if _try_simplify_node(nid, nodes, children, cfg, stats):
@@ -1028,7 +1105,7 @@ def _resolve_overlaps(
 
 def _normalize3(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
-    if n < 1e-15:
+    if n < NORMALIZE_EPSILON:
         return np.array([1.0, 0.0, 0.0], dtype=np.float64)
     return v / n
 
@@ -1209,7 +1286,7 @@ def _subdivide_edge_chain(
     p = nodes[parent_id]
     c = nodes[child_id]
     dist = _edge_len(p, c)
-    max_seg = cfg.max_seg_radius_factor * max(p.r, c.r, 1e-6)
+    max_seg = cfg.max_seg_radius_factor * max(p.r, c.r, RADIUS_EPSILON)
     if cfg.auto_connection:
         max_seg *= 2.0
     if dist <= max_seg:
@@ -1224,6 +1301,86 @@ def _subdivide_edge_chain(
             nodes, children, cur_parent, cur_child, t, stats=stats
         )
         cur_child = children[cur_parent][0]
+
+
+
+
+def _densify_high_curvature(
+    root_id: int,
+    nodes: dict[int, SwcNode],
+    children: dict[int, list[int]],
+    cfg: PreprocessConfig,
+    stats: PreprocessStats,
+) -> None:
+    """Insert samples through sharp bends so successive turn angles stay bounded.
+
+    At chain node B (parent A, one child C), if discrete curvature radius
+    rho = 0.5*(|AB|+|BC|) / theta is below ``curvature_radius_factor * r_B``,
+    or theta exceeds ``curvature_max_turn_per_sample``, insert a midpoint on the
+    longer adjacent edge. One insert per pass; children map rebuilt each pass.
+    """
+    if not cfg.densify_high_curvature:
+        return
+    factor = max(float(cfg.curvature_radius_factor), 1e-6)
+    min_turn = float(cfg.curvature_min_turn)
+    max_turn = max(float(cfg.curvature_max_turn_per_sample), 1e-3)
+
+    for _pass in range(48):
+        ch_map, _ = _build_children(nodes)
+        children.clear()
+        children.update(ch_map)
+
+        target = None  # (insert_parent, insert_child, t)
+        worst = 0.0
+        for nid in _iter_preorder(root_id, nodes, children):
+            if nid not in nodes:
+                continue
+            kids = children.get(nid, [])
+            pid = nodes[nid].parent
+            if pid not in nodes or len(kids) != 1:
+                continue
+            cid = kids[0]
+            if cid not in nodes:
+                continue
+            a, b, c = nodes[pid], nodes[nid], nodes[cid]
+            pa, pb, pc = _pos(a), _pos(b), _pos(c)
+            vin = pb - pa
+            vout = pc - pb
+            lin = float(np.linalg.norm(vin))
+            lout = float(np.linalg.norm(vout))
+            if lin < 1e-12 or lout < 1e-12:
+                continue
+            cos_t = float(np.clip(np.dot(vin, vout) / (lin * lout), -1.0, 1.0))
+            theta = math.acos(cos_t)
+            if theta < min_turn:
+                continue
+            half = min(max(theta * 0.5, 1e-6), math.pi * 0.5 - 1e-3)
+            r_fit = 0.90 * min(lin, lout) / (2.0 * math.tan(half)) / factor
+            r_b = max(float(b.r), 1e-9)
+            # Only extreme bends: densify when fit radius is far below SWC radius.
+            if r_fit >= 0.55 * r_b:
+                continue
+            score = r_b / max(r_fit, 1e-9)
+            if score <= worst:
+                continue
+            worst = score
+            if lin >= lout:
+                target = (pid, nid, 0.55)
+            else:
+                target = (nid, cid, 0.45)
+
+        if target is None:
+            break
+        ip, ic, tt = target
+        if ip not in children or ic not in nodes:
+            break
+        _insert_on_edge(nodes, children, ip, ic, tt, stats=stats)
+        stats.curvature_densified += 1
+
+    ch_map, _ = _build_children(nodes)
+    children.clear()
+    children.update(ch_map)
+
 
 
 def _subdivide_long_edges(
@@ -1253,7 +1410,7 @@ def _subdivide_long_edges(
             parent = nodes[p.parent]
             ppid = p.parent
             dist = _edge_len(parent, p)
-            max_seg = cfg.max_seg_radius_factor * p.r
+            max_seg = cfg.max_seg_radius_factor * max(p.r, RADIUS_EPSILON)
             if cfg.auto_connection:
                 max_seg *= 2.0
             if dist > max_seg and not _is_continuous_branch_link(
@@ -1266,7 +1423,7 @@ def _subdivide_long_edges(
                 if cid not in nodes:
                     continue
                 dist = _edge_len(p, nodes[cid])
-                max_seg = cfg.max_seg_radius_factor * p.r
+                max_seg = cfg.max_seg_radius_factor * max(p.r, RADIUS_EPSILON)
                 if cfg.auto_connection:
                     max_seg *= 2.0
                 if dist > max_seg:
@@ -1299,6 +1456,7 @@ def preprocess_swc(
     """
     cfg = config or PreprocessConfig()
     stats = PreprocessStats()
+    stats.warnings.extend(validate_swc_early(nodes, min_radius=min_radius))
 
     by_id: dict[int, SwcNode] = {}
     for n in nodes:
@@ -1352,6 +1510,9 @@ def preprocess_swc(
             children, _ = _build_children(by_id)
         _subdivide_long_edges(roots[0], by_id, children, cfg, stats, soma_root_id=roots[0])
         children, _ = _build_children(by_id)
+
+    # High-curvature densify disabled: prior version corrupted extent (stretched skeleton).
+    # Bend handling is done via apply_curvature_radius_limits at sweep time instead.
 
     _enforce_non_overlapping_spheres(
         roots[0],

@@ -18,13 +18,19 @@ __all__ = [
     "DEFAULT_MORPH_TS",
     "MorphBall",
     "MorphSegment",
+    "MorphSegmentArrays",
+    "MorphBallArrays",
     "collect_morph_balls",
     "collect_morph_segments",
     "conv_field_morph",
+    "conv_field_morph_python",
     "gradient_field_morph",
+    "morph_balls_to_arrays",
+    "morph_segments_to_arrays",
     "nearest_on_segments",
     "support_radius_ball",
     "support_radius_at",
+    "support_radius_max_on_segment",
     "ts_from_radius",
 ]
 
@@ -54,6 +60,8 @@ class MorphSegment:
     rb: float
     tsa: float
     tsb: float
+    # Max support radius along the segment (SWC-precomputable cull bound).
+    R_max: float = 0.0
 
 
 def ts_from_radius(radius: float, r_min: float, r_max: float) -> float:
@@ -63,6 +71,33 @@ def ts_from_radius(radius: float, r_min: float, r_max: float) -> float:
     t = (radius - r_min) / (r_max - r_min)
     t = float(np.clip(t, 0.0, 1.0))
     return TS_MIN + t * (TS_MAX - TS_MIN)
+
+
+def support_radius_max_on_segment(ra: float, rb: float, tsa: float, tsb: float) -> float:
+    """Max of R(t)=ts(t)*r(t) for t in [0,1] with linear endpoint interpolation.
+
+    Both ts and r are SWC-derived; this bound is constant per segment and safe for
+    early-outs / spatial culling without changing the field formula.
+    """
+    ra = max(float(ra), 1e-9)
+    rb = max(float(rb), 1e-9)
+    tsa = float(tsa)
+    tsb = float(tsb)
+    ra_end = tsa * ra
+    rb_end = tsb * rb
+    dts = tsb - tsa
+    dr = rb - ra
+    # R(t) = (tsa + t*dts)*(ra + t*dr) = a t^2 + b t + c
+    a = dts * dr
+    b = tsa * dr + ra * dts
+    rmax = max(ra_end, rb_end)
+    if abs(a) > 1e-15:
+        tcrit = -b / (2.0 * a)
+        if 0.0 < tcrit < 1.0:
+            rcrit = (tsa + tcrit * dts) * (ra + tcrit * dr)
+            if rcrit > rmax:
+                rmax = rcrit
+    return float(rmax)
 
 
 def collect_morph_segments(
@@ -91,6 +126,7 @@ def collect_morph_segments(
                 rb=rb,
                 tsa=tsa,
                 tsb=tsb,
+                R_max=support_radius_max_on_segment(ra, rb, tsa, tsb),
             )
         )
     return segs
@@ -117,7 +153,65 @@ def collect_morph_balls(
     return balls
 
 
+@dataclass
+class MorphSegmentArrays:
+    begin: np.ndarray  # (N, 3)
+    end: np.ndarray  # (N, 3)
+    ra: np.ndarray  # (N,)
+    rb: np.ndarray  # (N,)
+    tsa: np.ndarray  # (N,)
+    tsb: np.ndarray  # (N,)
+    R_max: np.ndarray  # (N,) SWC-precomputed cull radii
+
+
+@dataclass
+class MorphBallArrays:
+    center: np.ndarray  # (M, 3)
+    radius: np.ndarray  # (M,)
+    ts: np.ndarray  # (M,)
+    R_max: np.ndarray  # (M,)
+
+
+def morph_segments_to_arrays(segments: list[MorphSegment]) -> MorphSegmentArrays:
+    if not segments:
+        z3 = np.zeros((0, 3), dtype=np.float64)
+        z = np.zeros(0, dtype=np.float64)
+        return MorphSegmentArrays(z3, z3.copy(), z, z.copy(), z.copy(), z.copy(), z.copy())
+    rmax = np.array(
+        [
+            s.R_max if s.R_max > 0.0 else support_radius_max_on_segment(s.ra, s.rb, s.tsa, s.tsb)
+            for s in segments
+        ],
+        dtype=np.float64,
+    )
+    return MorphSegmentArrays(
+        begin=np.array([s.begin for s in segments], dtype=np.float64),
+        end=np.array([s.end for s in segments], dtype=np.float64),
+        ra=np.array([s.ra for s in segments], dtype=np.float64),
+        rb=np.array([s.rb for s in segments], dtype=np.float64),
+        tsa=np.array([s.tsa for s in segments], dtype=np.float64),
+        tsb=np.array([s.tsb for s in segments], dtype=np.float64),
+        R_max=rmax,
+    )
+
+
+def morph_balls_to_arrays(balls: list[MorphBall] | None) -> MorphBallArrays:
+    if not balls:
+        z3 = np.zeros((0, 3), dtype=np.float64)
+        z = np.zeros(0, dtype=np.float64)
+        return MorphBallArrays(z3, z, z.copy(), z.copy())
+    centers = np.array([b.center for b in balls], dtype=np.float64)
+    radius = np.array([b.radius for b in balls], dtype=np.float64)
+    ts = np.array([b.ts for b in balls], dtype=np.float64)
+    rmax = np.array(
+        [_vary_energy_radius_th(max(float(r), 1e-9), float(t))[0] for r, t in zip(radius, ts)],
+        dtype=np.float64,
+    )
+    return MorphBallArrays(centers, radius, ts, rmax)
+
+
 def supported_point_skeleton(p: Vec3, center: Vec3, r: float, ts: float) -> float:
+
     """Point-skeleton quartic field (root soma)."""
     R, w = _vary_energy_radius_th(max(r, 1e-9), ts)
     diff = np.asarray(p, dtype=np.float64) - center
@@ -265,15 +359,64 @@ def support_radius_ball(ball: MorphBall) -> float:
     return R
 
 
+def _point_seg_dist2(p: Vec3, begin: Vec3, end: Vec3) -> float:
+    ab = end - begin
+    len2 = float(np.dot(ab, ab))
+    if len2 < _EPS:
+        d = p - begin
+        return float(np.dot(d, d))
+    t = float(np.dot(p - begin, ab) / len2)
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+    q = begin + t * ab
+    d = p - q
+    return float(np.dot(d, d))
+
+
 def conv_field_morph(
     p: Vec3,
     segments: list[MorphSegment],
     root_balls: list[MorphBall] | None = None,
 ) -> float:
-    val = sum(
-        supported_line_skeleton(p, s.begin, s.end, s.ra, s.rb, s.tsa, s.tsb)
-        for s in segments
-    )
+    """MorphTesser quartic field. Uses SWC-precomputed R_max early-outs.
+
+    When Numba is available, prefers the packed/jitted path (same formula).
+    """
+    # Fast path: packed Numba evaluation (orders of magnitude on large SWCs).
+    try:
+        from quadmeshtesser.morph_parallel import conv_field_morph_fast
+
+        return float(conv_field_morph_fast(p, segments, root_balls))
+    except ImportError:
+        pass
+
+    p = np.asarray(p, dtype=np.float64)
+    val = 0.0
+    for s in segments:
+        rmax = s.R_max if s.R_max > 0.0 else support_radius_max_on_segment(s.ra, s.rb, s.tsa, s.tsb)
+        if _point_seg_dist2(p, s.begin, s.end) > rmax * rmax:
+            continue
+        val += supported_line_skeleton(p, s.begin, s.end, s.ra, s.rb, s.tsa, s.tsb)
+    for b in root_balls or ():
+        val += supported_point_skeleton(p, b.center, b.radius, b.ts)
+    return val
+
+
+def conv_field_morph_python(
+    p: Vec3,
+    segments: list[MorphSegment],
+    root_balls: list[MorphBall] | None = None,
+) -> float:
+    """Pure-Python Morph field with R_max cull (no Numba). For tests / fallback."""
+    p = np.asarray(p, dtype=np.float64)
+    val = 0.0
+    for s in segments:
+        rmax = s.R_max if s.R_max > 0.0 else support_radius_max_on_segment(s.ra, s.rb, s.tsa, s.tsb)
+        if _point_seg_dist2(p, s.begin, s.end) > rmax * rmax:
+            continue
+        val += supported_line_skeleton(p, s.begin, s.end, s.ra, s.rb, s.tsa, s.tsb)
     for b in root_balls or ():
         val += supported_point_skeleton(p, b.center, b.radius, b.ts)
     return val

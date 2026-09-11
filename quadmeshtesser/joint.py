@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+from quadmeshtesser.cpp_constants import (
+    BRANCH_SWEEP_MIN_FRAC,
+    BRANCH_SWEEP_MIN_RADIUS,
+    CURVATURE_SWEEP_MIN_FRAC,
+    CURVATURE_SWEEP_MIN_RADIUS,
+)
+
 import math
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 
-from quadmeshtesser.cpp_constants import D_PI, D_PI2, FOR_CX, HALF_ANGLE_RADIUS, SWEEP_VERT_CNT, DIV_CNT, DIV_ANGLE
+from quadmeshtesser.cpp_constants import (
+    CURVATURE_MIN_TURN,
+    CURVATURE_RADIUS_FACTOR,
+    D_PI,
+    D_PI2,
+    DIV_ANGLE,
+    DIV_CNT,
+    FOR_CX,
+    HALF_ANGLE_RADIUS,
+    NORMALIZE_EPSILON,
+    SWEEP_VERT_CNT,
+)
 from quadmeshtesser.swc_io import SwcNode
 
 Vec3 = np.ndarray
@@ -21,7 +39,7 @@ def _v3(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> Vec3:
 
 def _normalize(v: Vec3) -> Vec3:
     n = np.linalg.norm(v)
-    if n < 1e-15:
+    if n < NORMALIZE_EPSILON:
         return _v3(0, 0, 1)
     return v / n
 
@@ -314,16 +332,26 @@ def _angle_between(a: Vec3, b: Vec3) -> float:
     return math.acos(d)
 
 
+def _sweep_floor(radius: float, *, min_radius: float, min_frac: float) -> float:
+    """Absolute + relative floor so fork clamps do not crush tubes to needles."""
+    r = max(float(radius), 0.0)
+    return max(float(min_radius), float(min_frac) * r)
+
+
 def apply_branch_radius_limits(
     root: Joint,
     *,
     f_scale: float = 1.0,
-    min_radius: float = 0.01,
+    min_radius: float = BRANCH_SWEEP_MIN_RADIUS,
+    min_frac: float = BRANCH_SWEEP_MIN_FRAC,
     safety: float = 0.88,
 ) -> None:
     """
     Shrink sweep radii at forks when sibling branches are too close (C++ IsValidBranchPos spirit).
     Prevents quadrilateral cross-section self-intersection before CreateBoundSweep.
+
+    Floor is ``max(min_radius, min_frac * joint.radius)`` so acute forks do not
+    collapse child sweeps to a global needle (previously 0.01).
     """
     scale = max(f_scale, 1e-6)
     for j in root.iter_all():
@@ -343,21 +371,79 @@ def apply_branch_radius_limits(
             dist_i = float(np.linalg.norm(ci.offset))
             if dist_i < 1e-15:
                 continue
+            floor = _sweep_floor(ci.radius, min_radius=min_radius, min_frac=min_frac)
             limit = ci.sweep_radius if ci.sweep_radius is not None else ci.radius
             for cj in j.children:
                 if cj is ci:
                     continue
                 ang = _angle_between(ci.offset, cj.offset)
                 if ang < 1e-6:
-                    limit = min(limit, min_radius)
+                    # Near-parallel siblings: keep relative floor, do not force absolute needle.
+                    limit = min(limit, floor)
                     continue
                 limit = min(limit, dist_i * math.sin(ang * 0.5) * safety / scale)
-            ci.sweep_radius = max(min_radius, limit)
+            ci.sweep_radius = max(floor, limit)
 
         if sibling_angles:
             avg_d = sum(float(np.linalg.norm(c.offset)) for c in j.children) / len(j.children)
             j_lim = j.sweep_radius if j.sweep_radius is not None else j.radius
-            j.sweep_radius = max(min_radius, min(j_lim, avg_d * math.sin(min_ang * 0.5) * safety / scale))
+            j_floor = _sweep_floor(j.radius, min_radius=min_radius, min_frac=min_frac)
+            j.sweep_radius = max(
+                j_floor, min(j_lim, avg_d * math.sin(min_ang * 0.5) * safety / scale)
+            )
+
+
+
+
+
+def apply_curvature_radius_limits(
+    root: Joint,
+    *,
+    factor: float = CURVATURE_RADIUS_FACTOR,
+    min_turn: float = CURVATURE_MIN_TURN,
+    min_radius: float = CURVATURE_SWEEP_MIN_RADIUS,
+    min_frac: float = CURVATURE_SWEEP_MIN_FRAC,
+    safety: float = 0.90,
+) -> int:
+    """Shrink sweep radii on high-curvature chain bends.
+
+    At chain joint B (parent→B→child), with turn angle ``theta`` between
+    incoming/outgoing offsets and adjacent lengths ``lin``, ``lout``::
+
+        r_max ≈ safety * min(lin, lout) / (2 * tan(theta/2)) / factor
+
+    This matches the tube-fit condition on a polyline corner (stricter than a
+    simple ds/theta estimate) so RMF rings do not collide on the concave side.
+    Returns number of joints whose sweep radius was reduced by this pass.
+    """
+    factor = max(float(factor), 1e-6)
+    safety = float(np.clip(safety, 1e-3, 1.0))
+    n_clamp = 0
+    for j in root.iter_all():
+        if j.parent is None or len(j.children) != 1:
+            continue
+        ch = j.children[0]
+        vin = j.offset
+        vout = ch.offset
+        lin = float(np.linalg.norm(vin))
+        lout = float(np.linalg.norm(vout))
+        if lin < 1e-15 or lout < 1e-15:
+            continue
+        theta = _angle_between(vin, vout)
+        if theta < min_turn:
+            continue
+        # Avoid tan blow-up near 180° folds.
+        half = min(max(theta * 0.5, 1e-6), math.pi * 0.5 - 1e-3)
+        r_max = safety * min(lin, lout) / (2.0 * math.tan(half)) / factor
+        for node in (j, ch):
+            cur = node.sweep_radius if node.sweep_radius is not None else node.radius
+            if r_max < cur:
+                floor = _sweep_floor(node.radius, min_radius=min_radius, min_frac=min_frac)
+                node.sweep_radius = max(floor, r_max)
+                if node is j:
+                    n_clamp += 1
+    return n_clamp
+
 
 
 def build_joint_tree_from_nodes(nodes: list[SwcNode]) -> Joint:

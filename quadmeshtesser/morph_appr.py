@@ -154,11 +154,16 @@ def _approx_one(
 ) -> np.ndarray:
     orig = p.copy()
     pos = _radial_iso_seed(p, segments, iso, root_balls=root_balls)
-    max_move = max(2.5 * step_size, 1e-6)
+    # Floor max displacement by local support radius. Mesh min-edge (step_size) shrinks
+    # after subdivision and would otherwise clamp verts short of the isosurface (pinch).
+    q, seg, tt = nearest_on_segments(orig, segments)
+    R_loc = float(support_radius_at(q, seg, tt))
+    max_move = max(2.5 * step_size, 0.85 * R_loc, 1e-6)
     delta = pos - orig
     d = float(np.linalg.norm(delta))
+    # Never clamp away a successful radial seed (that recreates pinches).
     if d > max_move:
-        pos = orig + delta * (max_move / d)
+        max_move = d
     f_val = conv_field_morph(pos, segments, root_balls)
     if abs(f_val - iso) <= ISO_TOL:
         return pos
@@ -201,6 +206,33 @@ def approximate_vertices_morph(
     root_balls = collect_morph_balls(root, ts_fixed=ts_fixed)
     if not segments and not root_balls:
         return verts.copy()
+
+    # Prefer Numba batch path (same Morph formula + SWC-precomputed R_max culls).
+    try:
+        from quadmeshtesser.morph_parallel import approximate_vertices_morph_fast
+
+        fast = approximate_vertices_morph_fast(
+            verts, steps, segments, root_balls, iso, max_iter=max_iter
+        )
+        if fast is not None:
+            if np.isfinite(fast).all():
+                return fast
+            # Repair any non-finite rows with serial refine
+            out = fast.copy()
+            bad = ~np.isfinite(out).all(axis=1)
+            for i in np.nonzero(bad)[0]:
+                out[i] = _approx_one(
+                    verts[i].astype(np.float64),
+                    float(steps[i]),
+                    segments,
+                    iso,
+                    root_balls=root_balls,
+                    max_iter=max_iter,
+                )
+            return out
+    except ImportError:
+        pass
+
     out = verts.astype(np.float64).copy()
     for i in range(len(out)):
         out[i] = _approx_one(
