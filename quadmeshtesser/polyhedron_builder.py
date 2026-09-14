@@ -419,6 +419,15 @@ def _add_branch_hull_stub_quads(
                 and len(j.parent.children) == 1
                 and len(j.children) <= 1
             )
+            # Multi-child parent path: parent_pipe is THIS fork's waist. Under
+            # Y-loft that waist↔up stub is an A–C shortcut beside A–B–C–D
+            # (nested square / A-B-C-无 + A-C-D).
+            if (
+                connect_loft_at_fork
+                and j.bound_sweep_id >= 0
+                and parent_pipe == [j.bound_sweep_id * u + i for i in range(u)]
+            ):
+                skip_up = True
             if not skip_up:
                 parent = j.parent
                 _stub_strip(
@@ -429,7 +438,13 @@ def _add_branch_hull_stub_quads(
                     j.pos,
                 )
 
-        if branch_hull_stores_upstream(j, lay) and j.bound_sweep_id >= 0:
+        # Y-Fork loft already uses up_ring for A↔B/C; stubbing up_ring↔fork_pipe
+        # here double-connects coincident rings (环套环 / nested rings).
+        if (
+            branch_hull_stores_upstream(j, lay)
+            and j.bound_sweep_id >= 0
+            and not connect_loft_at_fork
+        ):
             fork_pipe = [j.bound_sweep_id * u + i for i in range(u)]
             if fork_pipe != up_ring:
                 _stub_strip(
@@ -839,9 +854,9 @@ def build_polyhedron_surface(
     vert_list = verts.tolist()
     q_list = quads
     t_list = tris
+    # Hollow loft: ring edges are completed by loft/stub strips. close_mesh_holes
+    # was sealing leftover boundaries with planar ring caps (内方片 / A-B-C-无).
     if not connect_branch_junction:
-        close_mesh_holes(vert_list, q_list, t_list, max_passes=12)
-    else:
         close_mesh_holes(vert_list, q_list, t_list, max_passes=12)
     mesh = QuadMesh(
         np.array(vert_list, dtype=np.float64),

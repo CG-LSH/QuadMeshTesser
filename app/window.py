@@ -492,6 +492,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先加载 SWC 文件")
             return
         try:
+            first_mesh = self._result is None
             pipeline = TreeQuadPipeline(self._params())
             self._result = pipeline.run(self._swc_path)
             m = self._result.mesh
@@ -530,7 +531,8 @@ class MainWindow(QMainWindow):
                 f"骨架 {len(sk.nodes)} 节点 / {n_branch} 分叉{pp_msg}",
                 10000,
             )
-            self._refresh_view()
+            # Preserve view on regenerate/subdiv; only frame if never had a camera.
+            self._refresh_view(reset_camera=first_mesh)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             if isinstance(exc, KeyError) and exc.args:
@@ -559,7 +561,15 @@ class MainWindow(QMainWindow):
             export_obj(self._result.mesh, path)
             self.statusBar().showMessage(f"已导出 {path}", 5000)
 
-    def _refresh_view(self) -> None:
+    def _refresh_view(self, *, reset_camera: bool = False) -> None:
+        # Keep the current mesh view across display / regenerate toggles.
+        cam = None
+        if not reset_camera:
+            try:
+                cam = self._plotter.camera_position
+            except Exception:
+                cam = None
+
         self._plotter.clear()
         self._plotter.add_axes()
 
@@ -673,5 +683,11 @@ class MainWindow(QMainWindow):
                 wire.GetProperty().SetRepresentationToWireframe()
                 _apply_culling(wire)
 
-        self._plotter.reset_camera()
+        if reset_camera or cam is None:
+            self._plotter.reset_camera()
+        else:
+            try:
+                self._plotter.camera_position = cam
+            except Exception:
+                self._plotter.reset_camera()
         self._plotter.render()

@@ -43,16 +43,18 @@ def _outward_bump_ceiling(
     r_end: float,
     f_scale: float,
 ) -> float:
-    """Relaxed axial ceiling so A/B/C can move outward at tight forks."""
+    """Axial ceiling for A/B/C; never past ``axial_cap_before_pipe``.
+
+    Earlier ``FORK_HULL_PIPE_GAP_RELAX`` *raised* the ceiling (strict/0.76),
+    parking hull rings near the child pipe waist → nested square + short
+    bow-tie stubs. Keep soft only as fallback when strict is unavailable.
+    """
     if edge_len < 1e-15:
         return 0.0
     strict = axial_cap_before_pipe(edge_len, r_fork, r_end, f_scale)
     soft = edge_len * min(0.92, max(EDGE_FRACTION, FORK_HULL_PIPE_GAP_RELAX))
-    if strict > 1e-15:
-        relaxed = max(strict / FORK_HULL_PIPE_GAP_RELAX, soft)
-    else:
-        relaxed = soft
-    return min(edge_len * 0.96, relaxed)
+    cap = strict if strict > 1e-15 else soft
+    return min(edge_len * 0.96, cap)
 
 
 def _parent_branch_angle(joint: Joint, child: Joint) -> float:

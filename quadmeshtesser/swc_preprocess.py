@@ -63,6 +63,10 @@ class PreprocessConfig:
     curvature_radius_factor: float = 1.5
     curvature_min_turn: float = 0.12
     curvature_max_turn_per_sample: float = 0.45
+    # Minimal gap-fill: only thin + long edges (L > factor * min(r))
+    fill_thin_long_gaps: bool = False  # off: junction pinch is not fixed by densify
+    thin_long_radius: float = 0.30
+    thin_long_seg_factor: float = 3.0
 
 
 
@@ -1383,6 +1387,60 @@ def _densify_high_curvature(
 
 
 
+
+def _fill_thin_long_gaps(
+    root_id: int,
+    nodes: dict[int, SwcNode],
+    children: dict[int, list[int]],
+    cfg: PreprocessConfig,
+    stats: PreprocessStats,
+) -> int:
+    """Insert midpoints only on thin pipes with sparse node spacing.
+
+    Targets edges where min(r_parent, r_child) <= thin_long_radius and
+    L > thin_long_seg_factor * min(r). One midpoint per edge per pass.
+    """
+    if not cfg.fill_thin_long_gaps:
+        return 0
+    r_thin = float(cfg.thin_long_radius)
+    factor = max(float(cfg.thin_long_seg_factor), 1e-6)
+    n_new = 0
+    for _pass in range(16):
+        ch_map, _ = _build_children(nodes)
+        children.clear()
+        children.update(ch_map)
+        targets: list[tuple[int, int]] = []
+        for nid, node in list(nodes.items()):
+            pid = node.parent
+            if pid not in nodes:
+                continue
+            p = nodes[pid]
+            rmin = min(float(p.r), float(node.r))
+            if rmin > r_thin:
+                continue
+            dist = _edge_len(p, node)
+            if dist <= factor * max(rmin, RADIUS_EPSILON):
+                continue
+            targets.append((pid, nid))
+        if not targets:
+            break
+        for pid, cid in targets:
+            if cid not in nodes or nodes[cid].parent != pid or pid not in nodes:
+                continue
+            if pid not in children:
+                ch_map, _ = _build_children(nodes)
+                children.clear()
+                children.update(ch_map)
+            if cid not in nodes or nodes[cid].parent != pid or pid not in children:
+                continue
+            _insert_on_edge(nodes, children, pid, cid, 0.5, stats=stats)
+            n_new += 1
+    ch_map, _ = _build_children(nodes)
+    children.clear()
+    children.update(ch_map)
+    return n_new
+
+
 def _subdivide_long_edges(
     root_id: int,
     nodes: dict[int, SwcNode],
@@ -1509,6 +1567,8 @@ def preprocess_swc(
             )
             children, _ = _build_children(by_id)
         _subdivide_long_edges(roots[0], by_id, children, cfg, stats, soma_root_id=roots[0])
+        children, _ = _build_children(by_id)
+        _fill_thin_long_gaps(roots[0], by_id, children, cfg, stats)
         children, _ = _build_children(by_id)
 
     # High-curvature densify disabled: prior version corrupted extent (stretched skeleton).
