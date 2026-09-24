@@ -11,9 +11,8 @@ from enum import Enum
 RMF_LOFT_METHOD_ID = "rmf_loft"
 RMF_LOFT_METHOD_LABEL_ZH = "RMF Y-Fork Loft"
 
-# Deprecated; kept for parse compatibility → maps to RMF_LOFT
 CONVEX_HULL_METHOD_ID = "convex_hull"
-CONVEX_HULL_METHOD_LABEL_ZH = "凸包法（已弃用）"
+CONVEX_HULL_METHOD_LABEL_ZH = "凸包法"
 
 VJP_METHOD_ID = "variational_junction_patch"
 VJP_METHOD_LABEL_ZH = "Variational Junction Patch"
@@ -26,14 +25,15 @@ class JunctionMethod(str, Enum):
     """RMF 扫掠 + Y 型二分叉 loft（hub 环按 spoke 分边 → 两子枝 RMF 角点对齐）。"""
 
     CONVEX_HULL = CONVEX_HULL_METHOD_ID
-    """已弃用；解析时回退为 ``RMF_LOFT``。"""
+    """凸包法：基于环顶点的3D凸包生成分叉连接。"""
 
     QUAD_SPHERE = "quad_sphere"
     """四边形球 mesh + portal 桥接（仅 root）。"""
 
 
 BRANCH_JUNCTION_CHOICES: tuple[tuple[str, str], ...] = (
-    (RMF_LOFT_METHOD_ID, f"{RMF_LOFT_METHOD_LABEL_ZH}（默认二分叉）"),
+    (RMF_LOFT_METHOD_ID, f"{RMF_LOFT_METHOD_LABEL_ZH}（默认）"),
+    (CONVEX_HULL_METHOD_ID, CONVEX_HULL_METHOD_LABEL_ZH),
 )
 
 DEFAULT_BRANCH_JUNCTION = JunctionMethod.RMF_LOFT
@@ -44,16 +44,10 @@ def parse_branch_junction(value: str | JunctionMethod | None) -> JunctionMethod:
     if value is None:
         return DEFAULT_BRANCH_JUNCTION
     if isinstance(value, JunctionMethod):
-        if value is JunctionMethod.CONVEX_HULL:
-            return JunctionMethod.RMF_LOFT
         return value
     key = str(value).strip().lower()
-    if key in (CONVEX_HULL_METHOD_ID, "convex_hull"):
-        return JunctionMethod.RMF_LOFT
     for m in JunctionMethod:
         if m.value == key or m.name.lower() == key:
-            if m is JunctionMethod.CONVEX_HULL:
-                return JunctionMethod.RMF_LOFT
             return m
     return DEFAULT_BRANCH_JUNCTION
 
@@ -62,8 +56,6 @@ def branch_junction_label(method: JunctionMethod) -> str:
     for vid, label in BRANCH_JUNCTION_CHOICES:
         if method.value == vid:
             return label
-    if method is JunctionMethod.CONVEX_HULL:
-        return RMF_LOFT_METHOD_LABEL_ZH
     return method.value
 
 
