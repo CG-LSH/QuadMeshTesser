@@ -807,17 +807,44 @@ def build_polyhedron_surface(
         for f in tris:
             _register_face(f, edge_counts)
 
-    _add_branch_hull_stub_quads(
-        root,
-        branch_layouts,
-        branch_hull_base,
-        quads,
-        tris,
-        edge_counts,
-        verts,
-        use_rmf=True,
-        connect_loft_at_fork=connect_branch_junction,
-    )
+        if branch_junction == JunctionMethod.CONVEX_HULL:
+            from quadmeshtesser.junction_hull import append_junction_hulls_3d
+            
+            ring_base = {j.node_id: j.bound_sweep_id * SWEEP_VERT_CNT 
+                        for j in root.iter_all() if j.bound_sweep_id >= 0}
+            assist_base = {}
+            if insert_assist and bound_tet_scaled:
+                for j in root.iter_all():
+                    if j.parent is not None and len(j.children) > 1 and j.branch_id >= 0:
+                        assist_base[j.node_id] = n_valid * SWEEP_VERT_CNT + j.branch_id * 2
+                if root_assist_base >= 0:
+                    assist_base[root.node_id] = root_assist_base
+            
+            vert_list = verts.tolist()
+            append_junction_hulls_3d(
+                root,
+                sides=SWEEP_VERT_CNT,
+                vertices=vert_list,
+                ring_base=ring_base,
+                assist_base=assist_base,
+                quads=quads,
+                tris=tris,
+                edge_counts=edge_counts,
+                insert_assist=insert_assist and bound_tet_scaled,
+            )
+            verts = np.array(vert_list, dtype=np.float64)
+        else:
+            _add_branch_hull_stub_quads(
+                root,
+                branch_layouts,
+                branch_hull_base,
+                quads,
+                tris,
+                edge_counts,
+                verts,
+                use_rmf=True,
+                connect_loft_at_fork=connect_branch_junction,
+            )
 
     if not connect_branch_junction:
         from quadmeshtesser.branch_loft_patch import append_branch_ring_preview

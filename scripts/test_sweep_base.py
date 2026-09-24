@@ -58,8 +58,8 @@ def test_cell021_sweep():
     )
 
 
-def test_convex_hull_alias_rmf_loft():
-    """Deprecated convex_hull param still builds watertight RMF loft mesh."""
+def test_convex_hull_junction_method():
+    """Convex hull junction method builds watertight mesh."""
     swc = ROOT / "data" / "cell021.CNG.swc"
     r = TreeQuadPipeline(
         PipelineParams(
@@ -70,10 +70,14 @@ def test_convex_hull_alias_rmf_loft():
             connect_branch_junction=True,
         )
     ).run(swc)
-    topo = topology_summary(r.mesh)
+    m = r.mesh
+    topo = topology_summary(m)
     assert topo["non_manifold"] == 0, topo
     assert topo["boundary"] == 0, topo
-    assert is_watertight(r.mesh)
+    assert is_watertight(m)
+    print(
+        f"cell021 sweep [convex_hull]: v={m.n_vertices} q={m.n_quads} t={m.n_triangles}"
+    )
 
 
 def test_vjp_all_quad_sweep():
@@ -168,7 +172,7 @@ if __name__ == "__main__":
     test_y_fork_binary_closure()
     test_class_bc1_nested_fork_connect()
     test_cell021_sweep()
-    test_convex_hull_alias_rmf_loft()
+    test_convex_hull_junction_method()
     test_vjp_all_quad_sweep()
     test_vjp_no_origin_spikes()
     print("test_sweep_base OK")
